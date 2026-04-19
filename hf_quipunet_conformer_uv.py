@@ -11,6 +11,7 @@
 
 from huggingface_hub import HfApi
 
+import json
 import os
 import sys
 import subprocess
@@ -146,7 +147,7 @@ if DEBUG_SMALL:
         "encoder_dim": 16,
         "num_encoder_layers": 2,
         "input_proj_dim": 8,
-        "learning_rate": 1e-3,
+        "learning_rate": 5e-4,
         "train_limit": 2000,
         "dev_limit": 500,
         "test_limit": 500,
@@ -158,7 +159,7 @@ else:
         "encoder_dim": 32,
         "num_encoder_layers": 3,
         "input_proj_dim": 8,
-        "learning_rate": 1e-3,
+        "learning_rate": 5e-4,
         "train_limit": None,
         "dev_limit": None,
         "test_limit": None,
@@ -166,7 +167,10 @@ else:
 
 print("DEBUG_SMALL =", DEBUG_SMALL, flush=True)
 print("run_cfg =", run_cfg, flush=True)
-checkpoint_path = "quipu_conformer_best_small.pt" if DEBUG_SMALL else "quipu_conformer_best_full.pt"
+checkpoint_path = (
+    "quipu_conformer_attn_best_small.pt" if DEBUG_SMALL
+    else "quipu_conformer_attn_best_full.pt"
+)
 print("checkpoint_path =", checkpoint_path, flush=True)
 
 HF_NAMESPACE = os.environ.get("HF_NAMESPACE", "jadicorn")
@@ -175,6 +179,11 @@ HF_MODEL_REPO = os.environ.get(
     "quipu-conformer-small" if DEBUG_SMALL else "quipu-conformer-full"
 )
 HF_TOKEN = os.environ.get("HF_TOKEN")
+
+DEV_GROUPED = True
+DEV_GROUP_FRACTION = 0.15
+DEV_GROUP_SEED = 42
+DEV_SPLIT_PATH = "quipu_grouped_dev_split.json"
 
 barcodeEncoding = {
     "000": 0, "001": 1, "010": 2, "011": 3,
@@ -197,21 +206,107 @@ trainSet = allDatasets[~testSetSelection]
 
 print("Trained noise levels:", noiseLevels(train=trainSet.trace.apply(lambda x: x[:20])), flush=True)
 
-X_train = prepareTraces(trainSet)
-Y_train_barcode = np.vstack(trainSet.barcode.values)
-Y_train_bound = np.vstack(trainSet.Bound)
+# Prepare full training-pool traces/labels first
+X_all_train = prepareTraces(trainSet)
+Y_all_barcode = np.vstack(trainSet.barcode.values)
+Y_all_bound = np.vstack(trainSet.Bound.values)
 
-ni_train = int(len(X_train) * 0.96)
-randomIndex = np.arange(len(X_train))
-np.random.shuffle(randomIndex)
+# Build grouped dev split by (barcode, nanopore)
+train_meta = trainSet[["barcode", "nanopore", "Bound"]].reset_index(drop=True).copy()
 
-X_dev = X_train[randomIndex[ni_train:], :]
-Y_dev_barcode = Y_train_barcode[randomIndex[ni_train:], :]
-Y_dev_bound = Y_train_bound[randomIndex[ni_train:], :]
+if DEV_GROUPED:
+    train_meta = train_meta.copy()
 
-X_train = X_train[randomIndex[:ni_train], :]
-Y_train_barcode = Y_train_barcode[randomIndex[:ni_train], :]
-Y_train_bound = Y_train_bound[randomIndex[:ni_train], :]
+    if os.path.exists(DEV_SPLIT_PATH):
+        print(f"Loading grouped dev split from {DEV_SPLIT_PATH}")
+        with open(DEV_SPLIT_PATH, "r", encoding="utf-8") as f:
+            split_info = json.load(f)
+
+        dev_groups_by_barcode = {
+            barcode: set(groups)
+            for barcode, groups in split_info["dev_groups_by_barcode"].items()
+        }
+    else:
+        print(f"Creating grouped dev split and saving to {DEV_SPLIT_PATH}")
+        rng = np.random.default_rng(DEV_GROUP_SEED)
+
+        dev_groups_by_barcode = {}
+
+        for barcode in sorted(train_meta["barcode"].unique()):
+            sub = train_meta[train_meta["barcode"] == barcode]
+            groups = np.array(sorted(sub["nanopore"].unique()))
+
+            n_dev_groups = max(1, int(np.ceil(len(groups) * DEV_GROUP_FRACTION)))
+            chosen_groups = rng.choice(groups, size=n_dev_groups, replace=False)
+
+            # convert to plain Python ints/strings for JSON
+            dev_groups_by_barcode[barcode] = sorted(
+                [int(x) if isinstance(x, (np.integer, int)) else x for x in chosen_groups.tolist()]
+            )
+
+        dev_counts_by_barcode = {}
+        for barcode, chosen_groups in dev_groups_by_barcode.items():
+            mask = (
+                (train_meta["barcode"] == barcode) &
+                (train_meta["nanopore"].isin(chosen_groups))
+            )
+            dev_counts_by_barcode[barcode] = int(mask.sum())
+
+        split_info = {
+            "seed": DEV_GROUP_SEED,
+            "fraction": DEV_GROUP_FRACTION,
+            "dev_groups_by_barcode": dev_groups_by_barcode,
+            "dev_counts_by_barcode": dev_counts_by_barcode,
+        }
+        
+        with open(DEV_SPLIT_PATH, "w", encoding="utf-8") as f:
+            json.dump(split_info, f, indent=2)
+
+    dev_mask = np.zeros(len(train_meta), dtype=bool)
+
+    for barcode, chosen_groups in dev_groups_by_barcode.items():
+        barcode_mask = (
+            (train_meta["barcode"] == barcode) &
+            (train_meta["nanopore"].isin(chosen_groups))
+        )
+        dev_mask |= barcode_mask.to_numpy()
+
+    # Safety check: every class should remain in training
+    train_barcodes_after_split = set(train_meta.loc[~dev_mask, "barcode"].unique())
+    expected_barcodes = set(train_meta["barcode"].unique())
+    missing = expected_barcodes - train_barcodes_after_split
+    if missing:
+        raise RuntimeError(f"Grouped dev split removed all training samples for barcodes: {missing}")
+
+    X_dev = X_all_train[dev_mask, :]
+    Y_dev_barcode = Y_all_barcode[dev_mask, :]
+    Y_dev_bound = Y_all_bound[dev_mask, :]
+
+    X_train = X_all_train[~dev_mask, :]
+    Y_train_barcode = Y_all_barcode[~dev_mask, :]
+    Y_train_bound = Y_all_bound[~dev_mask, :]
+
+    dev_meta = train_meta.loc[dev_mask].reset_index(drop=True)
+    train_meta_split = train_meta.loc[~dev_mask].reset_index(drop=True)
+
+    print("Using grouped dev split by (barcode, nanopore)")
+    print("Dev groups per barcode:")
+    for barcode in sorted(dev_groups_by_barcode):
+        print(barcode, dev_groups_by_barcode[barcode])
+else:
+    # Old random split fallback
+    ni_train = int(len(X_all_train) * 0.96)
+
+    randomIndex = np.arange(len(X_all_train))
+    np.random.shuffle(randomIndex)
+
+    X_dev = X_all_train[randomIndex[ni_train:], :]
+    Y_dev_barcode = Y_all_barcode[randomIndex[ni_train:], :]
+    Y_dev_bound = Y_all_bound[randomIndex[ni_train:], :]
+
+    X_train = X_all_train[randomIndex[:ni_train], :]
+    Y_train_barcode = Y_all_barcode[randomIndex[:ni_train], :]
+    Y_train_bound = Y_all_bound[randomIndex[:ni_train], :]
 
 X_test = prepareTraces(testSet)
 Y_test_barcode = np.vstack(testSet.barcode.values)
@@ -239,6 +334,12 @@ if run_cfg["test_limit"] is not None:
 print("len(X_train) = ", len(X_train), "   len(Y_train) = ", len(Y_train), flush=True)
 print("len(X_dev) = ", len(X_dev), flush=True)
 print("len(X_test) = ", len(X_test), flush=True)
+
+print("Train barcode counts:")
+print(pd.Series(list(map(oneHotToBarcode, Y_train))).value_counts().sort_index())
+
+print("Dev barcode counts:")
+print(pd.Series(list(map(oneHotToBarcode, Y_dev))).value_counts().sort_index())
 
 Y_train_labels = list(map(oneHotToBarcode, Y_train))
 Y_dev_labels = list(map(oneHotToBarcode, Y_dev))
@@ -283,19 +384,36 @@ test_lengths = torch.full((X_test_t.shape[0],), sequence_length, dtype=torch.lon
 class QuipuConformerClassifier(nn.Module):
     def __init__(self, num_classes, encoder_dim=32, num_encoder_layers=3, input_proj_dim=8):
         super().__init__()
+
         self.input_proj = nn.Linear(1, input_proj_dim)
+
         self.encoder = ConformerEncoder(
             input_dim=input_proj_dim,
             encoder_dim=encoder_dim,
             num_layers=num_encoder_layers,
         )
+
+        self.attn = nn.Linear(encoder_dim, 1)
         self.classifier = nn.Linear(encoder_dim, num_classes)
 
-    def forward(self, x, lengths):
+    def forward(self, x, lengths, return_attention=False):
         x = self.input_proj(x)
+
         encoder_out, output_lengths = self.encoder(x, lengths)
-        pooled = encoder_out.mean(dim=1)
+
+        max_len = encoder_out.size(1)
+        time_idx = torch.arange(max_len, device=encoder_out.device).unsqueeze(0)
+        mask = time_idx < output_lengths.unsqueeze(1)
+
+        attn_scores = self.attn(encoder_out).squeeze(-1)
+        attn_scores = attn_scores.masked_fill(~mask, float("-inf"))
+        attn_weights = torch.softmax(attn_scores, dim=1)
+
+        pooled = torch.sum(encoder_out * attn_weights.unsqueeze(-1), dim=1)
         logits = self.classifier(pooled)
+
+        if return_attention:
+            return logits, output_lengths, attn_weights
         return logits, output_lengths
 
 model = QuipuConformerClassifier(
@@ -424,4 +542,35 @@ if os.path.exists(checkpoint_path):
         )
 
         print(f"Uploaded checkpoint to https://huggingface.co/{repo_id}", flush=True)
+
+if os.path.exists(DEV_SPLIT_PATH):
+    api.upload_file(
+        path_or_fileobj=DEV_SPLIT_PATH,
+        path_in_repo=DEV_SPLIT_PATH,
+        repo_id=repo_id,
+        repo_type="model",
+    )
+    print(f"Uploaded dev split JSON to https://huggingface.co/{repo_id}", flush=True)
+else:
+    print(f"Warning: {DEV_SPLIT_PATH} not found; skipping split upload.", flush=True)
+
+run_metadata_path = "quipu_run_metadata.json"
+run_metadata = {
+    "debug_small": DEBUG_SMALL,
+    "checkpoint_path": checkpoint_path,
+    "dev_split_path": DEV_SPLIT_PATH,
+    "run_cfg": run_cfg,
+    "hp": hp,
+}
+
+with open(run_metadata_path, "w", encoding="utf-8") as f:
+    json.dump(run_metadata, f, indent=2)
+
+api.upload_file(
+    path_or_fileobj=run_metadata_path,
+    path_in_repo=run_metadata_path,
+    repo_id=repo_id,
+    repo_type="model",
+)
+print(f"Uploaded run metadata to https://huggingface.co/{repo_id}", flush=True)
 
