@@ -168,8 +168,8 @@ else:
 print("DEBUG_SMALL =", DEBUG_SMALL, flush=True)
 print("run_cfg =", run_cfg, flush=True)
 checkpoint_path = (
-    "quipu_conformer_attn_best_small.pt" if DEBUG_SMALL
-    else "quipu_conformer_attn_best_full.pt"
+    "quipu_conformer_best_small.pt" if DEBUG_SMALL
+    else "quipu_conformer_best_full.pt"
 )
 print("checkpoint_path =", checkpoint_path, flush=True)
 
@@ -381,7 +381,8 @@ train_lengths = torch.full((X_train_t.shape[0],), sequence_length, dtype=torch.l
 dev_lengths = torch.full((X_dev_t.shape[0],), sequence_length, dtype=torch.long).to(device)
 test_lengths = torch.full((X_test_t.shape[0],), sequence_length, dtype=torch.long).to(device)
 
-class QuipuConformerClassifier(nn.Module):
+# Gets worse performance
+class QuipuConformerPooledAttentionClassifier(nn.Module):
     def __init__(self, num_classes, encoder_dim=32, num_encoder_layers=3, input_proj_dim=8):
         super().__init__()
 
@@ -414,6 +415,24 @@ class QuipuConformerClassifier(nn.Module):
 
         if return_attention:
             return logits, output_lengths, attn_weights
+        return logits, output_lengths
+
+class QuipuConformerClassifier(nn.Module):
+    def __init__(self, num_classes, encoder_dim=32, num_encoder_layers=3, input_proj_dim=8):
+        super().__init__()
+        self.input_proj = nn.Linear(1, input_proj_dim)
+        self.encoder = ConformerEncoder(
+            input_dim=input_proj_dim,
+            encoder_dim=encoder_dim,
+            num_layers=num_encoder_layers,
+        )
+        self.classifier = nn.Linear(encoder_dim, num_classes)
+
+    def forward(self, x, lengths):
+        x = self.input_proj(x)
+        encoder_out, output_lengths = self.encoder(x, lengths)
+        pooled = encoder_out.mean(dim=1)
+        logits = self.classifier(pooled)
         return logits, output_lengths
 
 model = QuipuConformerClassifier(
