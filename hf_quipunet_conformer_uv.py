@@ -50,6 +50,52 @@ from conformer.encoder import ConformerEncoder  # noqa: E402
 NVIDIA = True
 DEBUG_SMALL = False
 
+def augment_magnitude(x, std=0.08):
+    """
+    Multiply each trace by a random scalar near 1.
+    x: (batch, time)
+    """
+    scales = np.random.normal(loc=1.0, scale=std, size=(len(x), 1))
+    return x * scales
+
+def augment_add_noise(x, std=0.08):
+    """
+    Add Gaussian noise to each trace.
+    x: (batch, time)
+    """
+    noise = np.random.normal(loc=0.0, scale=std, size=x.shape)
+    return x + noise
+
+def augment_stretch_duration(x, std=0.1, probability=0.3):
+    """
+    Randomly stretch/compress traces in time, then resample back to original length.
+    x: (batch, time)
+    """
+    out = np.empty_like(x)
+    target_len = x.shape[1]
+
+    for i in range(len(x)):
+        trace = x[i]
+
+        if np.random.rand() >= probability:
+            out[i] = trace
+            continue
+
+        factor = np.random.normal(loc=1.0, scale=std)
+        factor = np.clip(factor, 0.8, 1.2)
+
+        new_len = max(8, int(round(target_len * factor)))
+
+        old_pos = np.linspace(0.0, 1.0, target_len)
+        new_pos = np.linspace(0.0, 1.0, new_len)
+
+        stretched = np.interp(new_pos, old_pos, trace)
+
+        # resample back to original length
+        out[i] = np.interp(old_pos, new_pos, stretched)
+
+    return out
+
 def noiseLevels(train=None):
     global constantTypicalNoiseLevels
     if 'constantTypicalNoiseLevels' not in globals():
@@ -151,6 +197,11 @@ if DEBUG_SMALL:
         "train_limit": 2000,
         "dev_limit": 500,
         "test_limit": 500,
+        "augment": True,
+        "augment_magnitude_std": 0.08,
+        "augment_stretch_std": 0.10,
+        "augment_stretch_probability": 0.30,
+        "augment_noise_std": 0.08,
     }
 else:
     run_cfg = {
@@ -163,6 +214,11 @@ else:
         "train_limit": None,
         "dev_limit": None,
         "test_limit": None,
+        "augment": True,
+        "augment_magnitude_std": 0.08,
+        "augment_stretch_std": 0.10,
+        "augment_stretch_probability": 0.30,
+        "augment_noise_std": 0.08,
     }
 
 print("DEBUG_SMALL =", DEBUG_SMALL, flush=True)
@@ -381,6 +437,10 @@ train_lengths = torch.full((X_train_t.shape[0],), sequence_length, dtype=torch.l
 dev_lengths = torch.full((X_dev_t.shape[0],), sequence_length, dtype=torch.long).to(device)
 test_lengths = torch.full((X_test_t.shape[0],), sequence_length, dtype=torch.long).to(device)
 
+X_train_np = X_train.copy()
+y_train_idx_np = oneHotToNumber(Y_train).copy()
+train_lengths_np = np.full(len(X_train_np), sequence_length, dtype=np.int64)
+
 # Gets worse performance
 class QuipuConformerPooledAttentionClassifier(nn.Module):
     def __init__(self, num_classes, encoder_dim=32, num_encoder_layers=3, input_proj_dim=8):
@@ -483,12 +543,38 @@ for epoch in range(run_cfg["epochs"]):
     total_loss = 0.0
     total_correct = 0
     total_count = 0
-    for xb, yb, lb in train_loader:
+
+    # Apply signal augmentation
+    perm = np.random.permutation(len(X_train_np))
+
+    for start in range(0, len(X_train_np), batch_size):
+        idx = perm[start:start + batch_size]
+
+        xb_np = X_train_np[idx].copy()
+        yb_np = y_train_idx_np[idx]
+        lb_np = train_lengths_np[idx]
+
+        if run_cfg.get("augment", False):
+            xb_np = augment_magnitude(xb_np, std=run_cfg["augment_magnitude_std"])
+            xb_np = augment_stretch_duration(
+                xb_np,
+                std=run_cfg["augment_stretch_std"],
+                probability=run_cfg["augment_stretch_probability"],
+            )
+            xb_np = augment_add_noise(xb_np, std=run_cfg["augment_noise_std"])
+
+        xb = torch.tensor(xb_np, dtype=torch.float32).unsqueeze(-1).to(device)
+        yb = torch.tensor(yb_np, dtype=torch.long).to(device)
+        lb = torch.tensor(lb_np, dtype=torch.long).to(device)
+
         optimizer.zero_grad()
-        logits, _ = model(xb, lb)
+
+        logits, out_lengths = model(xb, lb)
         loss = criterion(logits, yb)
+
         loss.backward()
         optimizer.step()
+
         total_loss += loss.item() * xb.size(0)
         preds = torch.argmax(logits, dim=1)
         total_correct += (preds == yb).sum().item()
