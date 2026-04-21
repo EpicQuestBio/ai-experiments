@@ -1,0 +1,43 @@
+The DNA barcode proteins dataset comes from Bell & Keyser. If I can find the SNP dataset it comes from Kong, Zhu and Keyser. 
+
+Bell, N. A. W. & Keyser, U. F. Digitally encoded DNA nanostructures for multiplexed, single-molecule protein sensing with nanopores. Nature Nanotechnology 11, 645–651 (2016).
+Kong, J., Zhu, J. & Keyser, U. F. Single molecule based SNP detection using designed DNA carriers and solid-state nanopores. Chem. Commun. 53, 436–439 (2017).
+
+The QuipuNet paper and almost 100% of the code to load and preprocess that dataset comes from the QuipuNet authors.  Karolis Misiunas, Niklas Ermann, Ulrich F. Keyser. The code from QuipuNet uses the MIT License which is repeated here.
+
+MIT License
+
+Copyright (c) 2019 Karolis Misiunas, PhD
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+This is the QuipuNet citation in BibTex:
+
+@article{Misiunas_2018,
+   title={QuipuNet: Convolutional Neural Network for Single-Molecule Nanopore Sensing},
+   volume={18},
+   ISSN={1530-6992},
+   url={http://dx.doi.org/10.1021/acs.nanolett.8b01709},
+   DOI={10.1021/acs.nanolett.8b01709},
+   number={6},
+   journal={Nano Letters},
+   publisher={American Chemical Society (ACS)},
+   author={Misiunas, Karolis and Ermann, Niklas and Keyser, Ulrich F.},
+   year={2018},
+   month=may, pages={4040–4045} }
