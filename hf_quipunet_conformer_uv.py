@@ -25,6 +25,24 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.utils import class_weight
 from sklearn.metrics import confusion_matrix
 
+# Load dev split JSON
+from huggingface_hub import hf_hub_download
+import os
+
+DEV_SPLIT_PATH = "quipu_grouped_dev_split.json"
+HF_MODEL_REPO = os.environ.get("HF_MODEL_REPO", "jadicorn/quipu-conformer-full")
+
+if not os.path.exists(DEV_SPLIT_PATH):
+    try:
+        downloaded = hf_hub_download(
+            repo_id=HF_MODEL_REPO,
+            filename=DEV_SPLIT_PATH,
+            repo_type="model",
+            local_dir="."
+        )
+        print(f"Downloaded dev split from Hub: {downloaded}")
+    except Exception as e:
+        print(f"Could not download dev split JSON, will regenerate from seed: {e}")
 
 def run(cmd, cwd=None):
     print("+", " ".join(cmd), flush=True)
@@ -206,7 +224,7 @@ if DEBUG_SMALL:
 else:
     run_cfg = {
         "batch_size": 32,
-        "epochs": 20,
+        "epochs": 60,
         "encoder_dim": 32,
         "num_encoder_layers": 3,
         "input_proj_dim": 8,
